@@ -1,9 +1,9 @@
 streamlit
 gspread
 oauth2client
-streamlit-autorefresh
 requests
 opencv-python-headless
 pyzbar
+zxing-cpp
 Pillow
 numpy
