@@ -3,3 +3,7 @@ gspread
 oauth2client
 streamlit-autorefresh
 requests
+opencv-python-headless
+pyzbar
+Pillow
+numpy
