@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 import gspread.exceptions
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 
 try:
     from pyzbar.pyzbar import decode as pyzbar_decode
@@ -21,11 +21,7 @@ except ImportError:
     CV2_OK = False
 
 # ====== إعدادات الصفحة ======
-st.set_page_config(
-    page_title="📦 سكانر الشحنات",
-    page_icon="📦",
-    layout="centered"
-)
+st.set_page_config(page_title="📦 سكانر الشحنات", page_icon="📦", layout="centered")
 
 st.markdown("""
 <style>
@@ -70,7 +66,6 @@ scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis
 creds_dict = st.secrets["gcp_service_account"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
-
 SHEET_NAME = "Complaints"
 
 @st.cache_resource
@@ -114,53 +109,136 @@ def load_shipments():
     except Exception:
         return []
 
-def decode_barcode(image: Image.Image):
-    """قراءة الباركود من صورة - يجرب pyzbar أولاً ثم OpenCV"""
-    img_array = np.array(image.convert("RGB"))
+def preprocess_variants(image: Image.Image):
+    """يولد نسخ مختلفة من الصورة لزيادة فرص القراءة"""
+    variants = []
+    
+    # الصورة الأصلية
+    variants.append(image.convert("RGB"))
+    
+    # تكبير الصورة (مهم جداً للباركود البعيد)
+    w, h = image.size
+    for scale in [2.0, 3.0, 1.5]:
+        resized = image.resize((int(w*scale), int(h*scale)), Image.LANCZOS)
+        variants.append(resized.convert("RGB"))
+    
+    # تحسين الحدة
+    sharp = ImageEnhance.Sharpness(image).enhance(3.0)
+    variants.append(sharp.convert("RGB"))
+    
+    # تحسين التباين
+    contrast = ImageEnhance.Contrast(image).enhance(2.5)
+    variants.append(contrast.convert("RGB"))
+    
+    # تحويل لـ grayscale مع تحسين
+    gray = image.convert("L")
+    gray_contrast = ImageEnhance.Contrast(gray).enhance(3.0)
+    variants.append(gray_contrast.convert("RGB"))
+    
+    return variants
 
-    # === pyzbar ===
-    if PYZBAR_OK:
-        try:
-            results = pyzbar_decode(image)
-            if results:
-                return results[0].data.decode("utf-8")
-        except Exception:
-            pass
-
-    # === OpenCV QR detector ===
-    if CV2_OK:
-        try:
-            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-            detector = cv2.QRCodeDetector()
-            data, _, _ = detector.detectAndDecode(gray)
-            if data:
-                return data
-            # WeChatQRCode (أحدث)
-            try:
-                wechat = cv2.wechat_qrcode_WeChatQRCode()
-                texts, _ = wechat.detectAndDecode(gray)
-                if texts:
-                    return texts[0]
-            except Exception:
-                pass
-        except Exception:
-            pass
-
+def try_pyzbar(img):
+    if not PYZBAR_OK:
+        return None
+    try:
+        results = pyzbar_decode(img)
+        if results:
+            return results[0].data.decode("utf-8")
+    except Exception:
+        pass
     return None
+
+def try_opencv(img):
+    if not CV2_OK:
+        return None
+    try:
+        arr = np.array(img.convert("RGB"))
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        
+        # QR detector
+        detector = cv2.QRCodeDetector()
+        data, _, _ = detector.detectAndDecode(gray)
+        if data:
+            return data
+        
+        # adaptive threshold
+        thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 11, 2
+        )
+        thresh_pil = Image.fromarray(thresh)
+        result = try_pyzbar(thresh_pil)
+        if result:
+            return result
+        
+        # otsu threshold
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        otsu_pil = Image.fromarray(otsu)
+        result = try_pyzbar(otsu_pil)
+        if result:
+            return result
+
+        # sharpen kernel
+        kernel = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
+        sharpened = cv2.filter2D(gray, -1, kernel)
+        result = try_pyzbar(Image.fromarray(sharpened))
+        if result:
+            return result
+
+    except Exception:
+        pass
+    return None
+
+def decode_barcode(image: Image.Image):
+    """يجرب كل الطرق الممكنة لقراءة الباركود"""
+    variants = preprocess_variants(image)
+    
+    for variant in variants:
+        # pyzbar أولاً
+        result = try_pyzbar(variant)
+        if result:
+            return result
+        # opencv
+        result = try_opencv(variant)
+        if result:
+            return result
+    
+    return None
+
+def show_result(awb, data):
+    found = [row for row in data[1:] if len(row) > 0 and str(row[0]).strip() == awb.strip()]
+    if found:
+        date = found[0][1] if len(found[0]) > 1 else ""
+        st.markdown(f"""
+        <div class="result-found">
+            <span style="font-size:2.5rem;">✅</span>
+            <span class="awb-number">{awb}</span>
+            <span class="date-text">📅 تاريخ التسجيل: {date}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div class="result-notfound">
+            ⚠️ الشحنة <strong>{awb}</strong> غير موجودة في السجل
+        </div>
+        """, unsafe_allow_html=True)
 
 # ====== الواجهة ======
 st.markdown("<h1>📦 سكانر الشحنات</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align:center; color:#aaa; margin-top:-12px;'>تسجيل ومتابعة أرقام الشحنات الصادرة</p>", unsafe_allow_html=True)
 
-# ====== تبويبات ======
 tab1, tab2 = st.tabs(["📷 سكان", "📋 القائمة"])
 
 with tab1:
     st.markdown("### 📷 التقاط صورة الباركود")
-    st.info("افتح الكاميرا والتقط صورة للباركود - يدعم كل أنواع الباركود")
+    st.markdown("""
+    <div style="background:rgba(240,192,64,0.1); border:1px solid rgba(240,192,64,0.3);
+        border-radius:10px; padding:12px; text-align:center; color:#f0c040; margin-bottom:12px;">
+        💡 <strong>نصيحة:</strong> التقط الصورة والباركود يملأ معظم الإطار
+    </div>
+    """, unsafe_allow_html=True)
 
-    # st.camera_input يفتح كاميرا الموبايل مباشرة بشكل موثوق
-    camera_image = st.camera_input("📸 التقط الباركود", label_visibility="collapsed")
+    camera_image = st.camera_input("📸", label_visibility="collapsed")
 
     if camera_image:
         image = Image.open(camera_image)
@@ -168,52 +246,18 @@ with tab1:
             result = decode_barcode(image)
 
         if result:
-            st.success(f"✅ تم قراءة الباركود: **{result}**")
-            # بحث مباشر
+            st.success(f"✅ **{result}**")
             data = load_shipments()
-            found = [row for row in data[1:] if len(row) > 0 and str(row[0]).strip() == result.strip()]
-            if found:
-                date = found[0][1] if len(found[0]) > 1 else ""
-                st.markdown(f"""
-                <div class="result-found">
-                    <span style="font-size:2.5rem;">✅</span>
-                    <span class="awb-number">{result}</span>
-                    <span class="date-text">📅 تاريخ التسجيل: {date}</span>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                <div class="result-notfound">
-                    ⚠️ الشحنة <strong>{result}</strong> غير موجودة في السجل
-                </div>
-                """, unsafe_allow_html=True)
+            show_result(result, data)
         else:
-            st.warning("⚠️ لم يتم التعرف على الباركود - حاول مرة أخرى بصورة أوضح")
+            st.warning("⚠️ لم يتم التعرف - حاول مرة أخرى وقرّب الكاميرا أكثر للباركود")
 
     st.markdown("---")
     st.markdown("### 🔍 بحث يدوي")
-    search_awb = st.text_input(
-        "رقم الشحنة",
-        placeholder="اكتب رقم الشحنة...",
-        label_visibility="collapsed"
-    )
+    search_awb = st.text_input("رقم الشحنة", placeholder="اكتب رقم الشحنة...", label_visibility="collapsed")
     if search_awb.strip():
         data = load_shipments()
-        results = [row for row in data[1:] if len(row) > 0 and str(row[0]).strip() == search_awb.strip()]
-        if results:
-            date = results[0][1] if len(results[0]) > 1 else ""
-            st.markdown(f"""
-            <div class="result-found">
-                <span class="awb-number">✅ {search_awb}</span>
-                <span class="date-text">📅 تاريخ التسجيل: {date}</span>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div class="result-notfound">
-                ⚠️ لم يتم العثور على الشحنة: <strong>{search_awb}</strong>
-            </div>
-            """, unsafe_allow_html=True)
+        show_result(search_awb.strip(), data)
 
 with tab2:
     st.markdown("### 📋 جميع الشحنات المسجلة")
