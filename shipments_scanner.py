@@ -149,59 +149,60 @@ def deskew(img_gray_arr):
     except Exception:
         return img_gray_arr
 
+def deblur_image(gray_arr):
+    try:
+        blurred = cv2.GaussianBlur(gray_arr, (0, 0), 3)
+        deblurred = cv2.addWeighted(gray_arr, 2.5, blurred, -1.5, 0)
+        return np.clip(deblurred, 0, 255).astype(np.uint8)
+    except Exception:
+        return gray_arr
+
 def make_variants(image: Image.Image):
     variants = []
     orig = image.convert("RGB")
     w, h = orig.size
-
-    # ---- نسخ بأحجام مختلفة ----
-    for scale in [1.0, 1.5, 2.0, 3.0]:
-        resized = orig.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-        variants.append(resized)
-
-    # ---- grayscale محسّن ----
     gray = image.convert("L")
-    for contrast_val in [2.0, 3.0]:
-        c = ImageEnhance.Contrast(gray).enhance(contrast_val)
-        s = ImageEnhance.Sharpness(c).enhance(3.0)
-        variants.append(s.convert("RGB"))
-        big = s.resize((w * 2, h * 2), Image.LANCZOS)
-        variants.append(big.convert("RGB"))
+    gray_arr = np.array(gray)
 
-    # ---- unsharp mask ----
-    for radius in [1, 2]:
-        blurred   = orig.filter(ImageFilter.GaussianBlur(radius=radius))
-        arr_orig  = np.array(orig, dtype=np.float32)
-        arr_blur  = np.array(blurred, dtype=np.float32)
-        sharpened = np.clip(arr_orig + 1.5 * (arr_orig - arr_blur), 0, 255).astype(np.uint8)
-        variants.append(Image.fromarray(sharpened))
+    # 1. اصلية
+    variants.append(orig)
 
-    # ---- تصحيح الزاوية (deskew) ----
+    # 2. مكبّرة x2
+    big = orig.resize((w * 2, h * 2), Image.LANCZOS)
+    variants.append(big)
+
+    # 3. deblur
     if CV2_OK:
         try:
-            gray_arr = np.array(gray)
+            db = deblur_image(gray_arr)
+            variants.append(Image.fromarray(db).convert("RGB"))
+            db_big = cv2.resize(db, (w * 2, h * 2), interpolation=cv2.INTER_LANCZOS4)
+            variants.append(Image.fromarray(db_big).convert("RGB"))
+        except Exception:
+            pass
+
+    # 4. contrast + sharpen
+    c = ImageEnhance.Contrast(gray).enhance(3.0)
+    s = ImageEnhance.Sharpness(c).enhance(4.0)
+    variants.append(s.convert("RGB"))
+    variants.append(s.resize((w * 2, h * 2), Image.LANCZOS).convert("RGB"))
+
+    # 5. deskew
+    if CV2_OK:
+        try:
             deskewed = deskew(gray_arr)
             if deskewed is not gray_arr:
                 variants.append(Image.fromarray(deskewed).convert("RGB"))
-                # مكبّر أيضاً
                 dsk_big = cv2.resize(deskewed, (w * 2, h * 2), interpolation=cv2.INTER_LANCZOS4)
                 variants.append(Image.fromarray(dsk_big).convert("RGB"))
         except Exception:
             pass
 
-    # ---- تدوير ±90 و180 (لو الباركود مقلوب أو أفقي) ----
-    for angle in [90, 180, 270]:
-        variants.append(orig.rotate(angle, expand=True))
-
-    # ---- crop وسط الصورة (أحياناً الباركود في المنتصف) ----
+    # 6. crop المنتصف x3
     try:
         cw, ch = w // 4, h // 4
         cropped = orig.crop((cw, ch, w - cw, h - ch))
-        cr2 = cropped.resize((w, h), Image.LANCZOS)
-        variants.append(cr2)
-        # نسخة مكبّرة من الـ crop
-        cr3 = cropped.resize((w * 2, h * 2), Image.LANCZOS)
-        variants.append(cr3)
+        variants.append(cropped.resize((w * 2, h * 2), Image.LANCZOS))
     except Exception:
         pass
 
@@ -394,6 +395,16 @@ def scan_and_show(awb: str, data: list):
 # ====== الواجهة ======
 st.markdown("<h1>📦 سكانر الشحنات</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align:center; color:#aaa; margin-top:-12px;'>تسجيل ومتابعة أرقام الشحنات الصادرة</p>", unsafe_allow_html=True)
+
+# عرض المكتبات المحملة
+libs = []
+if ZXING_OK:  libs.append("✅ zxing-cpp")
+else:         libs.append("❌ zxing-cpp")
+if PYZBAR_OK: libs.append("✅ pyzbar")
+else:         libs.append("❌ pyzbar")
+if CV2_OK:    libs.append("✅ opencv")
+else:         libs.append("❌ opencv")
+st.caption("مكتبات القراءة: " + " | ".join(libs))
 
 tab1, tab2 = st.tabs(["📷 سكان", "📋 القائمة"])
 
