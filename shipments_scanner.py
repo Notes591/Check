@@ -150,10 +150,6 @@ def deskew(img_gray_arr):
         return img_gray_arr
 
 def auto_crop_barcode(image: Image.Image):
-    """
-    يكتشف منطقة الباركود تلقائياً ويزوم عليها.
-    يبحث عن المنطقة ذات الكثافة العالية من الخطوط الرأسية.
-    """
     if not CV2_OK:
         return []
     crops = []
@@ -162,37 +158,30 @@ def auto_crop_barcode(image: Image.Image):
         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
         h, w = gray.shape
 
-        # Sobel رأسي لاكتشاف الخطوط الرأسية (خاصية الباركود الخطي)
         sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         sobelx = np.uint8(np.absolute(sobelx))
 
-        # threshold + morphological لتجميع منطقة الباركود
         _, thresh = cv2.threshold(sobelx, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         kernel   = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 5))
         closed   = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
         kernel2  = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 15))
         closed   = cv2.morphologyEx(closed, cv2.MORPH_DILATE, kernel2)
 
-        # ابحث عن أكبر contour
         contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return []
 
-        # رتّب حسب المساحة وخذ أكبر 3
         contours = sorted(contours, key=cv2.contourArea, reverse=True)[:3]
         for cnt in contours:
             x, y, cw, ch = cv2.boundingRect(cnt)
-            # تجاهل المناطق الصغيرة جداً
             if cw < w * 0.1 or ch < h * 0.05:
                 continue
-            # أضف padding
             pad_x, pad_y = int(cw * 0.1), int(ch * 0.2)
             x1 = max(0, x - pad_x)
             y1 = max(0, y - pad_y)
             x2 = min(w, x + cw + pad_x)
             y2 = min(h, y + ch + pad_y)
             cropped = image.crop((x1, y1, x2, y2))
-            # كبّر الـ crop لـ 400px على الأقل عرضاً
             cw2, ch2 = cropped.size
             if cw2 < 400:
                 scale = 400 / cw2
@@ -203,7 +192,6 @@ def auto_crop_barcode(image: Image.Image):
     except Exception:
         pass
     return crops
-
 
 def deblur_image(gray_arr):
     """إزالة الضبابية من الصورة"""
@@ -226,13 +214,9 @@ def make_variants(image: Image.Image):
     # 1. اصلية
     variants.append(orig)
 
-    # 2. مكبّرة x2 بـ NEAREST (يحافظ على حواف الباركود)
-    big2 = orig.resize((w * 2, h * 2), Image.NEAREST)
-    variants.append(big2)
-
-    # 2b. مكبّرة x3
-    big3 = orig.resize((w * 3, h * 3), Image.NEAREST)
-    variants.append(big3)
+    # 2. مكبّرة x2
+    big = orig.resize((w * 2, h * 2), Image.LANCZOS)
+    variants.append(big)
 
     # 3. deblur
     if CV2_OK:
@@ -289,8 +273,6 @@ def try_pyzbar(img):
     return None
 
 def sharpen_for_barcode(gray):
-    """تحسين حاد خصيصاً للباركود الخطي"""
-    # kernel قوي لتوضيح الخطوط الرأسية
     kernel_sharpen = np.array([
         [-1, -1, -1],
         [-1,  9, -1],
@@ -298,7 +280,6 @@ def sharpen_for_barcode(gray):
     ])
     sharpened = cv2.filter2D(gray, -1, kernel_sharpen)
 
-    # kernel لتعزيز الخطوط الرأسية (مهم للباركود الخطي)
     kernel_vertical = np.array([
         [0, -1, 0],
         [0,  2, 0],
@@ -315,11 +296,9 @@ def try_opencv(img):
         arr  = np.array(img.convert("RGB"))
         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
 
-        # QR detector
         data, _, _ = cv2.QRCodeDetector().detectAndDecode(gray)
         if data: return data
 
-        # adaptive threshold بقيم مختلفة
         for block in [7, 11, 15, 21, 31]:
             for c_val in [2, 5, 8]:
                 thresh = cv2.adaptiveThreshold(
@@ -328,23 +307,19 @@ def try_opencv(img):
                 r = try_pyzbar(Image.fromarray(thresh))
                 if r: return r
 
-        # otsu
         _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         r = try_pyzbar(Image.fromarray(otsu))
         if r: return r
 
-        # CLAHE بقيم مختلفة
         for clip in [2.0, 4.0, 8.0]:
             clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
             cl = clahe.apply(gray)
             r = try_pyzbar(Image.fromarray(cl))
             if r: return r
-            # threshold بعد CLAHE
             _, cl_thresh = cv2.threshold(cl, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             r = try_pyzbar(Image.fromarray(cl_thresh))
             if r: return r
 
-        # sharpen kernels للباركود الخطي
         sharpened, vertical = sharpen_for_barcode(gray)
         for processed in [sharpened, vertical]:
             r = try_pyzbar(Image.fromarray(processed))
@@ -353,7 +328,6 @@ def try_opencv(img):
             r = try_pyzbar(Image.fromarray(t))
             if r: return r
 
-        # bilateral filter (يحافظ على الحواف)
         bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
         r = try_pyzbar(Image.fromarray(bilateral))
         if r: return r
@@ -361,7 +335,6 @@ def try_opencv(img):
         r = try_pyzbar(Image.fromarray(bil_thresh))
         if r: return r
 
-        # morphological closing (يوصّل الخطوط المنقطعة)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
         closed = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel)
         r = try_pyzbar(Image.fromarray(closed))
@@ -374,7 +347,7 @@ def decode_barcode(image: Image.Image):
     orig = image.convert("RGB")
     w, h = orig.size
 
-    # ====== الخطوة 0: auto-crop - اكتشف الباركود وزوم عليه ======
+    # الخطوة 0: auto-crop
     crops = auto_crop_barcode(orig)
     for crop in crops:
         for angle in [0, 90, 270, 180]:
@@ -383,47 +356,22 @@ def decode_barcode(image: Image.Image):
                 r = fn(rotated)
                 if r and r.strip(): return r.strip()
 
-    # ====== الخطوة 1: الصورة الأصلية بكل الاتجاهات ======
+    # الخطوة 1: الصورة الأصلية
     for angle in [0, 90, 270, 180]:
         rotated = orig.rotate(angle, expand=True) if angle != 0 else orig
         for fn in [try_zxing, try_pyzbar, try_opencv]:
             r = fn(rotated)
             if r and r.strip(): return r.strip()
 
-    # ====== الخطوة 2: threshold بدون تكبير (مهم لـ Code 39) ======
-    if CV2_OK:
-        try:
-            gray_arr = np.array(orig.convert("L"))
-            _, otsu = cv2.threshold(gray_arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            otsu_img = Image.fromarray(otsu).convert("RGB")
-            for angle in [0, 90, 270, 180]:
-                rotated = otsu_img.rotate(angle, expand=True) if angle != 0 else otsu_img
-                for fn in [try_zxing, try_pyzbar]:
-                    r = fn(rotated)
-                    if r and r.strip(): return r.strip()
-        except Exception:
-            pass
+    # الخطوة 2: مكبّرة ×2
+    big = orig.resize((w * 2, h * 2), Image.LANCZOS)
+    for angle in [0, 90, 270, 180]:
+        rotated = big.rotate(angle, expand=True) if angle != 0 else big
+        for fn in [try_zxing, try_pyzbar, try_opencv]:
+            r = fn(rotated)
+            if r and r.strip(): return r.strip()
 
-    # ====== الخطوة 3: تكبير بـ NEAREST (يحافظ على حواف الباركود الخطي) ======
-    for scale in [2, 3, 4]:
-        big_nearest = orig.resize((w * scale, h * scale), Image.NEAREST)
-        for angle in [0, 90, 270, 180]:
-            rotated = big_nearest.rotate(angle, expand=True) if angle != 0 else big_nearest
-            for fn in [try_zxing, try_pyzbar, try_opencv]:
-                r = fn(rotated)
-                if r and r.strip(): return r.strip()
-        if CV2_OK:
-            try:
-                gray_arr = np.array(big_nearest.convert("L"))
-                _, otsu = cv2.threshold(gray_arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                otsu_img = Image.fromarray(otsu).convert("RGB")
-                for fn in [try_zxing, try_pyzbar]:
-                    r = fn(otsu_img)
-                    if r and r.strip(): return r.strip()
-            except Exception:
-                pass
-
-    # ====== الخطوة 4: variants المعالجة (deblur + contrast + deskew) ======
+    # الخطوة 3: variants
     variants = make_variants(image)
     for v in variants:
         for fn in [try_zxing, try_pyzbar, try_opencv]:
@@ -432,38 +380,12 @@ def decode_barcode(image: Image.Image):
 
     return None
 
-# ====== البحث والعرض ======
-def show_result(awb: str, data: list):
-    """بحث عادي بدون تسجيل - للبحث اليدوي"""
-    rows = data[1:] if len(data) > 1 else []
-    found = [row for row in rows if len(row) > 0 and str(row[0]).strip() == awb.strip()]
-    if found:
-        date = found[0][1] if len(found[0]) > 1 else ""
-        st.markdown(f"""
-        <div class="result-found">
-            <span style="font-size:2.5rem;">✅</span>
-            <span class="awb-number">{awb}</span>
-            <span class="date-text">📅 تاريخ التسجيل: {date}</span>
-        </div>""", unsafe_allow_html=True)
-    else:
-        st.markdown(f"""
-        <div class="result-notfound">
-            ⚠️ الشحنة <strong>{awb}</strong> غير موجودة في السجل
-        </div>""", unsafe_allow_html=True)
-
+# ====== منطق السكان المشترك (كاميرا + بحث يدوي) ======
 def scan_and_show(awb: str, data: list):
-    """
-    منطق السكان:
-    - لو الشحنة موجودة في الشيت:
-        * لو عمود C (تاريخ آخر سكان) فاضي → أول مرة تُسكن → يكتب التاريخ ويعرض موجود
-        * لو عمود C فيه تاريخ → سكنتها قبل كده → تحذير بالتاريخ القديم ويحدّث بالجديد
-    - لو مش موجودة → غير موجود في السجل
-    """
     rows = data[1:] if len(data) > 1 else []
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # ابحث عن الصف وفهرسه الحقيقي في الشيت
-    found_index = None  # رقم الصف في الشيت (يبدأ من 2)
+    found_index = None
     found_row   = None
     for i, row in enumerate(rows, start=2):
         if len(row) > 0 and str(row[0]).strip() == awb.strip():
@@ -472,22 +394,19 @@ def scan_and_show(awb: str, data: list):
             break
 
     if found_row is None:
-        # مش موجودة في الشيت
         st.markdown(f"""
         <div class="result-notfound">
             ⚠️ الشحنة <strong>{awb}</strong> غير موجودة في السجل
         </div>""", unsafe_allow_html=True)
         return
 
-    date_added   = found_row[1] if len(found_row) > 1 else ""
-    last_scan    = found_row[2] if len(found_row) > 2 else ""
+    date_added = found_row[1] if len(found_row) > 1 else ""
+    last_scan  = found_row[2] if len(found_row) > 2 else ""
 
-    # سجّل تاريخ السكان الحالي في العمود C
     safe_update(shipments_sheet, f"C{found_index}", now_str)
     st.cache_data.clear()
 
     if last_scan.strip() == "":
-        # أول مرة تُسكن هذه الشحنة
         st.markdown(f"""
         <div class="result-found">
             <span style="font-size:2.5rem;">✅</span>
@@ -496,7 +415,6 @@ def scan_and_show(awb: str, data: list):
             <span class="date-text">🕐 تم إسكانها الآن: {now_str}</span>
         </div>""", unsafe_allow_html=True)
     else:
-        # سبق إسكانها — تحذير
         st.markdown(f"""
         <div class="result-duplicate">
             <span class="dup-title">⚠️ تنبيه: هذه الشحنة تم إسكانها من قبل!</span>
@@ -513,7 +431,6 @@ def scan_and_show(awb: str, data: list):
 st.markdown("<h1>📦 سكانر الشحنات</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align:center; color:#aaa; margin-top:-12px;'>تسجيل ومتابعة أرقام الشحنات الصادرة</p>", unsafe_allow_html=True)
 
-# عرض المكتبات المحملة
 libs = []
 if ZXING_OK:  libs.append("✅ zxing-cpp")
 else:         libs.append("❌ zxing-cpp")
@@ -551,10 +468,47 @@ with tab1:
 
     st.markdown("---")
     st.markdown("### 🔍 بحث يدوي")
-    search_awb = st.text_input("رقم الشحنة", placeholder="اكتب رقم الشحنة...", label_visibility="collapsed")
-    if search_awb.strip():
-        data = load_shipments()
-        show_result(search_awb.strip(), data)
+
+    # تحميل بيانات الشحنات للاقتراحات
+    data_for_search = load_shipments()
+    all_awbs = [row[0].strip() for row in data_for_search[1:] if len(row) > 0 and row[0].strip()]
+
+    # حقل الإدخال
+    search_input = st.text_input(
+        "رقم الشحنة",
+        placeholder="اكتب رقم الشحنة...",
+        label_visibility="collapsed",
+        key="manual_search"
+    )
+
+    if search_input.strip():
+        typed = search_input.strip()
+
+        # فلترة الاقتراحات - تبدأ بنفس الأحرف المكتوبة
+        suggestions = [awb for awb in all_awbs if awb.upper().startswith(typed.upper())]
+
+        # لو الكود المكتوب مطابق تماماً لشحنة موجودة → ابحث مباشرة
+        exact_match = typed in all_awbs
+
+        if exact_match:
+            # بحث مباشر مع تسجيل في الشيت
+            scan_and_show(typed, data_for_search)
+
+        elif suggestions and typed != suggestions[0]:
+            # عرض الاقتراحات
+            st.markdown(f"<p style='color:#f0c040; font-size:0.9rem; margin-bottom:6px;'>🔎 {len(suggestions)} نتيجة محتملة — اختر أو أكمل الكتابة:</p>", unsafe_allow_html=True)
+            cols = st.columns(min(len(suggestions), 3))
+            for i, suggestion in enumerate(suggestions[:9]):
+                with cols[i % 3]:
+                    if st.button(suggestion, key=f"sug_{suggestion}_{i}"):
+                        scan_and_show(suggestion, data_for_search)
+
+        else:
+            # لا توجد نتائج
+            st.markdown(f"""
+            <div class="result-notfound">
+                ⚠️ الشحنة <strong>{typed}</strong> غير موجودة في السجل
+            </div>""", unsafe_allow_html=True)
 
 with tab2:
     st.markdown("### 📋 جميع الشحنات المسجلة")
