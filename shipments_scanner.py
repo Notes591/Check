@@ -205,6 +205,10 @@ def auto_crop_barcode(image: Image.Image):
     return crops
 
 
+def deblur_image(gray_arr):
+    """إزالة الضبابية من الصورة"""
+    if not CV2_OK:
+        return gray_arr
     try:
         blurred = cv2.GaussianBlur(gray_arr, (0, 0), 3)
         deblurred = cv2.addWeighted(gray_arr, 2.5, blurred, -1.5, 0)
@@ -223,8 +227,12 @@ def make_variants(image: Image.Image):
     variants.append(orig)
 
     # 2. مكبّرة x2
-    big = orig.resize((w * 2, h * 2), Image.LANCZOS)
-    variants.append(big)
+    big2 = orig.resize((w * 2, h * 2), Image.LANCZOS)
+    variants.append(big2)
+
+    # 2b. مكبّرة x3
+    big3 = orig.resize((w * 3, h * 3), Image.LANCZOS)
+    variants.append(big3)
 
     # 3. deblur
     if CV2_OK:
@@ -383,14 +391,30 @@ def decode_barcode(image: Image.Image):
             if r and r.strip(): return r.strip()
 
     # ====== الخطوة 2: مكبّرة ×2 بكل الاتجاهات ======
-    big = orig.resize((w * 2, h * 2), Image.LANCZOS)
+    big2 = orig.resize((w * 2, h * 2), Image.LANCZOS)
     for angle in [0, 90, 270, 180]:
-        rotated = big.rotate(angle, expand=True) if angle != 0 else big
+        rotated = big2.rotate(angle, expand=True) if angle != 0 else big2
         for fn in [try_zxing, try_pyzbar, try_opencv]:
             r = fn(rotated)
             if r and r.strip(): return r.strip()
 
-    # ====== الخطوة 3: variants المعالجة (deblur + contrast + deskew) ======
+    # ====== الخطوة 3: مكبّرة ×3 بكل الاتجاهات ======
+    big3 = orig.resize((w * 3, h * 3), Image.LANCZOS)
+    for angle in [0, 90, 270, 180]:
+        rotated = big3.rotate(angle, expand=True) if angle != 0 else big3
+        for fn in [try_zxing, try_pyzbar, try_opencv]:
+            r = fn(rotated)
+            if r and r.strip(): return r.strip()
+
+    # ====== الخطوة 4: مكبّرة ×4 بكل الاتجاهات ======
+    big4 = orig.resize((w * 4, h * 4), Image.LANCZOS)
+    for angle in [0, 90, 270, 180]:
+        rotated = big4.rotate(angle, expand=True) if angle != 0 else big4
+        for fn in [try_zxing, try_pyzbar, try_opencv]:
+            r = fn(rotated)
+            if r and r.strip(): return r.strip()
+
+    # ====== الخطوة 5: variants المعالجة (deblur + contrast + deskew) ======
     variants = make_variants(image)
     for v in variants:
         for fn in [try_zxing, try_pyzbar, try_opencv]:
