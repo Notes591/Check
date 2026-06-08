@@ -226,12 +226,12 @@ def make_variants(image: Image.Image):
     # 1. اصلية
     variants.append(orig)
 
-    # 2. مكبّرة x2
-    big2 = orig.resize((w * 2, h * 2), Image.LANCZOS)
+    # 2. مكبّرة x2 بـ NEAREST (يحافظ على حواف الباركود)
+    big2 = orig.resize((w * 2, h * 2), Image.NEAREST)
     variants.append(big2)
 
     # 2b. مكبّرة x3
-    big3 = orig.resize((w * 3, h * 3), Image.LANCZOS)
+    big3 = orig.resize((w * 3, h * 3), Image.NEAREST)
     variants.append(big3)
 
     # 3. deblur
@@ -390,31 +390,40 @@ def decode_barcode(image: Image.Image):
             r = fn(rotated)
             if r and r.strip(): return r.strip()
 
-    # ====== الخطوة 2: مكبّرة ×2 بكل الاتجاهات ======
-    big2 = orig.resize((w * 2, h * 2), Image.LANCZOS)
-    for angle in [0, 90, 270, 180]:
-        rotated = big2.rotate(angle, expand=True) if angle != 0 else big2
-        for fn in [try_zxing, try_pyzbar, try_opencv]:
-            r = fn(rotated)
-            if r and r.strip(): return r.strip()
+    # ====== الخطوة 2: threshold بدون تكبير (مهم لـ Code 39) ======
+    if CV2_OK:
+        try:
+            gray_arr = np.array(orig.convert("L"))
+            _, otsu = cv2.threshold(gray_arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            otsu_img = Image.fromarray(otsu).convert("RGB")
+            for angle in [0, 90, 270, 180]:
+                rotated = otsu_img.rotate(angle, expand=True) if angle != 0 else otsu_img
+                for fn in [try_zxing, try_pyzbar]:
+                    r = fn(rotated)
+                    if r and r.strip(): return r.strip()
+        except Exception:
+            pass
 
-    # ====== الخطوة 3: مكبّرة ×3 بكل الاتجاهات ======
-    big3 = orig.resize((w * 3, h * 3), Image.LANCZOS)
-    for angle in [0, 90, 270, 180]:
-        rotated = big3.rotate(angle, expand=True) if angle != 0 else big3
-        for fn in [try_zxing, try_pyzbar, try_opencv]:
-            r = fn(rotated)
-            if r and r.strip(): return r.strip()
+    # ====== الخطوة 3: تكبير بـ NEAREST (يحافظ على حواف الباركود الخطي) ======
+    for scale in [2, 3, 4]:
+        big_nearest = orig.resize((w * scale, h * scale), Image.NEAREST)
+        for angle in [0, 90, 270, 180]:
+            rotated = big_nearest.rotate(angle, expand=True) if angle != 0 else big_nearest
+            for fn in [try_zxing, try_pyzbar, try_opencv]:
+                r = fn(rotated)
+                if r and r.strip(): return r.strip()
+        if CV2_OK:
+            try:
+                gray_arr = np.array(big_nearest.convert("L"))
+                _, otsu = cv2.threshold(gray_arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                otsu_img = Image.fromarray(otsu).convert("RGB")
+                for fn in [try_zxing, try_pyzbar]:
+                    r = fn(otsu_img)
+                    if r and r.strip(): return r.strip()
+            except Exception:
+                pass
 
-    # ====== الخطوة 4: مكبّرة ×4 بكل الاتجاهات ======
-    big4 = orig.resize((w * 4, h * 4), Image.LANCZOS)
-    for angle in [0, 90, 270, 180]:
-        rotated = big4.rotate(angle, expand=True) if angle != 0 else big4
-        for fn in [try_zxing, try_pyzbar, try_opencv]:
-            r = fn(rotated)
-            if r and r.strip(): return r.strip()
-
-    # ====== الخطوة 5: variants المعالجة (deblur + contrast + deskew) ======
+    # ====== الخطوة 4: variants المعالجة (deblur + contrast + deskew) ======
     variants = make_variants(image)
     for v in variants:
         for fn in [try_zxing, try_pyzbar, try_opencv]:
