@@ -224,24 +224,85 @@ def try_pyzbar(img):
     except Exception: pass
     return None
 
+def sharpen_for_barcode(gray):
+    """تحسين حاد خصيصاً للباركود الخطي"""
+    # kernel قوي لتوضيح الخطوط الرأسية
+    kernel_sharpen = np.array([
+        [-1, -1, -1],
+        [-1,  9, -1],
+        [-1, -1, -1]
+    ])
+    sharpened = cv2.filter2D(gray, -1, kernel_sharpen)
+
+    # kernel لتعزيز الخطوط الرأسية (مهم للباركود الخطي)
+    kernel_vertical = np.array([
+        [0, -1, 0],
+        [0,  2, 0],
+        [0, -1, 0]
+    ], dtype=np.float32)
+    vertical = cv2.filter2D(gray, -1, kernel_vertical)
+    vertical = np.clip(vertical, 0, 255).astype(np.uint8)
+
+    return sharpened, vertical
+
 def try_opencv(img):
     if not CV2_OK: return None
     try:
         arr  = np.array(img.convert("RGB"))
         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+
+        # QR detector
         data, _, _ = cv2.QRCodeDetector().detectAndDecode(gray)
         if data: return data
-        for block in [11, 21, 31]:
-            thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, 2)
-            r = try_pyzbar(Image.fromarray(thresh))
-            if r: return r
+
+        # adaptive threshold بقيم مختلفة
+        for block in [7, 11, 15, 21, 31]:
+            for c_val in [2, 5, 8]:
+                thresh = cv2.adaptiveThreshold(
+                    gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY, block, c_val)
+                r = try_pyzbar(Image.fromarray(thresh))
+                if r: return r
+
+        # otsu
         _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         r = try_pyzbar(Image.fromarray(otsu))
         if r: return r
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        cl = clahe.apply(gray)
-        r = try_pyzbar(Image.fromarray(cl))
+
+        # CLAHE بقيم مختلفة
+        for clip in [2.0, 4.0, 8.0]:
+            clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
+            cl = clahe.apply(gray)
+            r = try_pyzbar(Image.fromarray(cl))
+            if r: return r
+            # threshold بعد CLAHE
+            _, cl_thresh = cv2.threshold(cl, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            r = try_pyzbar(Image.fromarray(cl_thresh))
+            if r: return r
+
+        # sharpen kernels للباركود الخطي
+        sharpened, vertical = sharpen_for_barcode(gray)
+        for processed in [sharpened, vertical]:
+            r = try_pyzbar(Image.fromarray(processed))
+            if r: return r
+            _, t = cv2.threshold(processed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            r = try_pyzbar(Image.fromarray(t))
+            if r: return r
+
+        # bilateral filter (يحافظ على الحواف)
+        bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
+        r = try_pyzbar(Image.fromarray(bilateral))
         if r: return r
+        _, bil_thresh = cv2.threshold(bilateral, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        r = try_pyzbar(Image.fromarray(bil_thresh))
+        if r: return r
+
+        # morphological closing (يوصّل الخطوط المنقطعة)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
+        closed = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel)
+        r = try_pyzbar(Image.fromarray(closed))
+        if r: return r
+
     except Exception: pass
     return None
 
