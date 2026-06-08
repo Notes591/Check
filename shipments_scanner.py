@@ -308,11 +308,26 @@ def try_opencv(img):
     return None
 
 def decode_barcode(image: Image.Image):
+    # أولاً: جرّب الصورة الأصلية مباشرة بكل المكتبات (الأسرع)
+    orig = image.convert("RGB")
+    for fn in [try_zxing, try_pyzbar, try_opencv]:
+        r = fn(orig)
+        if r and r.strip(): return r.strip()
+
+    # ثانياً: جرّب الصورة مكبّرة ×2 مباشرة
+    w, h = orig.size
+    big = orig.resize((w * 2, h * 2), Image.LANCZOS)
+    for fn in [try_zxing, try_pyzbar, try_opencv]:
+        r = fn(big)
+        if r and r.strip(): return r.strip()
+
+    # ثالثاً: باقي الـ variants المعالجة
     variants = make_variants(image)
     for v in variants:
         for fn in [try_zxing, try_pyzbar, try_opencv]:
             r = fn(v)
             if r and r.strip(): return r.strip()
+
     return None
 
 # ====== البحث والعرض ======
