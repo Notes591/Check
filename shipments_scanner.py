@@ -9,9 +9,9 @@ import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
 
 # === محاولة تحميل أفضل مكتبة متاحة ===
-ZXING_OK  = False
+ZXING_OK = False
 PYZBAR_OK = False
-CV2_OK    = False
+CV2_OK   = False
 
 try:
     import zxingcpp
@@ -45,19 +45,12 @@ h1, h2, h3 { color: #f0c040 !important; text-align: center; text-shadow: 0 0 20p
     border: 2px solid rgba(0,200,100,0.6);
     border-radius: 14px; padding: 24px; margin: 12px 0; text-align: center;
 }
-.result-duplicate {
-    background: linear-gradient(135deg, rgba(255,150,0,0.2), rgba(255,100,0,0.1));
-    border: 2px solid rgba(255,150,0,0.8);
-    border-radius: 14px; padding: 24px; margin: 12px 0; text-align: center;
-}
 .result-notfound {
     background: rgba(255,80,80,0.1); border: 1px solid rgba(255,80,80,0.4);
     border-radius: 12px; padding: 16px; text-align: center; color: #ff6b6b;
 }
 .awb-number { font-size: 2rem; font-weight: 900; color: #f0c040; display: block; }
 .date-text  { font-size: 1rem; color: #aaa; display: block; margin-top: 4px; }
-.dup-title  { font-size: 1.3rem; font-weight: 900; color: #ff9500; display: block; margin-bottom: 8px; }
-.dup-info   { font-size: 1rem; color: #ffd580; display: block; margin: 4px 0; }
 .stButton > button {
     background: linear-gradient(135deg, #f0c040, #d4a017) !important;
     color: #1a1a2e !important; font-weight: 700 !important; font-size: 1.1rem !important;
@@ -93,10 +86,19 @@ def get_shipments_sheet():
         ws = ss.worksheet("Shipments")
     except gspread.exceptions.WorksheetNotFound:
         ws = ss.add_worksheet(title="Shipments", rows="5000", cols="5")
-        ws.append_row(["رقم الشحنة", "التاريخ", "تاريخ آخر سكان"])
+        ws.append_row(["رقم الشحنة", "التاريخ"])
     return ws
 
 shipments_sheet = get_shipments_sheet()
+
+def safe_append(sheet, row_data, retries=5, delay=1):
+    for _ in range(retries):
+        try:
+            sheet.append_row(row_data)
+            return True
+        except Exception:
+            time.sleep(delay)
+    return False
 
 def safe_delete(sheet, row_index, retries=5, delay=1):
     for _ in range(retries):
@@ -107,16 +109,7 @@ def safe_delete(sheet, row_index, retries=5, delay=1):
             time.sleep(delay)
     return False
 
-def safe_update(sheet, cell, value, retries=5, delay=1):
-    for _ in range(retries):
-        try:
-            sheet.update(cell, [[value]])
-            return True
-        except Exception:
-            time.sleep(delay)
-    return False
-
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=30)
 def load_shipments():
     try:
         return shipments_sheet.get_all_values()
@@ -125,78 +118,111 @@ def load_shipments():
 
 # ====== معالجة الصور ======
 def make_variants(image: Image.Image):
+    """يولّد نسخاً محسّنة من الصورة لزيادة فرص القراءة"""
     variants = []
     orig = image.convert("RGB")
     w, h = orig.size
+
+    # --- نسخ بأحجام مختلفة ---
     for scale in [1.0, 1.5, 2.0, 3.0]:
         resized = orig.resize((int(w*scale), int(h*scale)), Image.LANCZOS)
         variants.append(resized)
+
+    # --- grayscale محسّن ---
     gray = image.convert("L")
     for contrast_val in [2.0, 3.0]:
         c = ImageEnhance.Contrast(gray).enhance(contrast_val)
         s = ImageEnhance.Sharpness(c).enhance(3.0)
         variants.append(s.convert("RGB"))
+        # مكبّر أيضاً
         big = s.resize((w*2, h*2), Image.LANCZOS)
         variants.append(big.convert("RGB"))
+
+    # --- unsharp mask (يوضّح حواف الباركود) ---
     for radius in [1, 2]:
         blurred = orig.filter(ImageFilter.GaussianBlur(radius=radius))
         arr_orig = np.array(orig, dtype=np.float32)
         arr_blur = np.array(blurred, dtype=np.float32)
         sharpened = np.clip(arr_orig + 1.5*(arr_orig - arr_blur), 0, 255).astype(np.uint8)
         variants.append(Image.fromarray(sharpened))
+
     return variants
 
-def try_zxing(img):
-    if not ZXING_OK: return None
+def try_zxing(img: Image.Image):
+    if not ZXING_OK:
+        return None
     try:
         arr = np.array(img.convert("RGB"))
         results = zxingcpp.read_barcodes(arr)
-        if results: return results[0].text
-    except Exception: pass
+        if results:
+            return results[0].text
+    except Exception:
+        pass
     return None
 
-def try_pyzbar(img):
-    if not PYZBAR_OK: return None
+def try_pyzbar(img: Image.Image):
+    if not PYZBAR_OK:
+        return None
     try:
         results = pyzbar_decode(img)
-        if results: return results[0].data.decode("utf-8")
-    except Exception: pass
+        if results:
+            return results[0].data.decode("utf-8")
+    except Exception:
+        pass
     return None
 
-def try_opencv(img):
-    if not CV2_OK: return None
+def try_opencv(img: Image.Image):
+    if not CV2_OK:
+        return None
     try:
         arr  = np.array(img.convert("RGB"))
         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+
+        # QRCodeDetector
         data, _, _ = cv2.QRCodeDetector().detectAndDecode(gray)
-        if data: return data
+        if data:
+            return data
+
+        # adaptive threshold → pyzbar
         for block in [11, 21, 31]:
-            thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, 2)
+            thresh = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, block, 2
+            )
             r = try_pyzbar(Image.fromarray(thresh))
-            if r: return r
+            if r:
+                return r
+
+        # otsu → pyzbar
         _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         r = try_pyzbar(Image.fromarray(otsu))
-        if r: return r
+        if r:
+            return r
+
+        # CLAHE (تحسين التباين المحلي) → pyzbar
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        cl = clahe.apply(gray)
+        cl    = clahe.apply(gray)
         r = try_pyzbar(Image.fromarray(cl))
-        if r: return r
-    except Exception: pass
+        if r:
+            return r
+
+    except Exception:
+        pass
     return None
 
 def decode_barcode(image: Image.Image):
+    """يجرب كل المكتبات على كل الـ variants"""
     variants = make_variants(image)
     for v in variants:
         for fn in [try_zxing, try_pyzbar, try_opencv]:
             r = fn(v)
-            if r and r.strip(): return r.strip()
+            if r and r.strip():
+                return r.strip()
     return None
 
-# ====== البحث والعرض ======
-def show_result(awb: str, data: list):
-    """بحث عادي بدون تسجيل - للبحث اليدوي"""
-    rows = data[1:] if len(data) > 1 else []
-    found = [row for row in rows if len(row) > 0 and str(row[0]).strip() == awb.strip()]
+# ====== عرض النتيجة ======
+def show_result(awb, data):
+    found = [row for row in data[1:] if len(row) > 0 and str(row[0]).strip() == awb.strip()]
     if found:
         date = found[0][1] if len(found[0]) > 1 else ""
         st.markdown(f"""
@@ -209,64 +235,6 @@ def show_result(awb: str, data: list):
         st.markdown(f"""
         <div class="result-notfound">
             ⚠️ الشحنة <strong>{awb}</strong> غير موجودة في السجل
-        </div>""", unsafe_allow_html=True)
-
-def scan_and_show(awb: str, data: list):
-    """
-    منطق السكان:
-    - لو الشحنة موجودة في الشيت:
-        * لو عمود C (تاريخ آخر سكان) فاضي → أول مرة تُسكن → يكتب التاريخ ويعرض موجود
-        * لو عمود C فيه تاريخ → سكنتها قبل كده → تحذير بالتاريخ القديم ويحدّث بالجديد
-    - لو مش موجودة → غير موجود في السجل
-    """
-    rows = data[1:] if len(data) > 1 else []
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # ابحث عن الصف وفهرسه الحقيقي في الشيت
-    found_index = None  # رقم الصف في الشيت (يبدأ من 2)
-    found_row   = None
-    for i, row in enumerate(rows, start=2):
-        if len(row) > 0 and str(row[0]).strip() == awb.strip():
-            found_index = i
-            found_row   = row
-            break
-
-    if found_row is None:
-        # مش موجودة في الشيت
-        st.markdown(f"""
-        <div class="result-notfound">
-            ⚠️ الشحنة <strong>{awb}</strong> غير موجودة في السجل
-        </div>""", unsafe_allow_html=True)
-        return
-
-    date_added   = found_row[1] if len(found_row) > 1 else ""
-    last_scan    = found_row[2] if len(found_row) > 2 else ""
-
-    # سجّل تاريخ السكان الحالي في العمود C
-    safe_update(shipments_sheet, f"C{found_index}", now_str)
-    st.cache_data.clear()
-
-    if last_scan.strip() == "":
-        # أول مرة تُسكن هذه الشحنة
-        st.markdown(f"""
-        <div class="result-found">
-            <span style="font-size:2.5rem;">✅</span>
-            <span class="awb-number">{awb}</span>
-            <span class="date-text">📅 تاريخ التسجيل: {date_added}</span>
-            <span class="date-text">🕐 تم إسكانها الآن: {now_str}</span>
-        </div>""", unsafe_allow_html=True)
-    else:
-        # سبق إسكانها — تحذير
-        st.markdown(f"""
-        <div class="result-duplicate">
-            <span class="dup-title">⚠️ تنبيه: هذه الشحنة تم إسكانها من قبل!</span>
-            <span class="dup-info">📦 رقم الشحنة: <strong>{awb}</strong></span>
-            <span class="dup-info">📅 تاريخ التسجيل في الشيت: <strong>{date_added}</strong></span>
-            <span class="dup-info">🕐 تاريخ ووقت الإسكان السابق: <strong>{last_scan}</strong></span>
-            <span class="dup-info">🕐 تاريخ ووقت الإسكان الحالي: <strong>{now_str}</strong></span>
-            <span class="dup-info" style="color:#ff6b6b; margin-top:8px;">
-                ⛔ قد تكون هناك شحنتان بنفس الرقم — يرجى المراجعة
-            </span>
         </div>""", unsafe_allow_html=True)
 
 # ====== الواجهة ======
@@ -293,9 +261,9 @@ with tab1:
             result = decode_barcode(image)
 
         if result:
-            st.success(f"✅ تم قراءة الباركود: **{result}**")
+            st.success(f"✅ **{result}**")
             data = load_shipments()
-            scan_and_show(result, data)
+            show_result(result, data)
         else:
             st.warning("⚠️ لم يتم التعرف - حاول مرة أخرى")
 
@@ -313,20 +281,14 @@ with tab2:
         rows = data[1:]
         st.metric("📦 إجمالي الشحنات", len(rows))
         for idx, row in enumerate(reversed(rows[:100])):
-            awb       = row[0] if len(row) > 0 else ""
-            date      = row[1] if len(row) > 1 else ""
-            last_scan = row[2] if len(row) > 2 else ""
+            awb  = row[0] if len(row) > 0 else ""
+            date = row[1] if len(row) > 1 else ""
             real_row_index = len(rows) - idx + 1
-            label = f"📦 {awb}  |  📅 {date}"
-            if last_scan:
-                label += f"  |  🕐 آخر سكان: {last_scan}"
-            with st.expander(label):
+            with st.expander(f"📦 {awb}  |  📅 {date}"):
                 col_a, col_b = st.columns([3, 1])
                 with col_a:
                     st.write(f"**رقم الشحنة:** {awb}")
-                    st.write(f"**تاريخ التسجيل:** {date}")
-                    if last_scan:
-                        st.write(f"**آخر إسكان:** {last_scan}")
+                    st.write(f"**التاريخ:** {date}")
                 with col_b:
                     if st.button("🗑️ حذف", key=f"del_{awb}_{idx}"):
                         if safe_delete(shipments_sheet, real_row_index):
