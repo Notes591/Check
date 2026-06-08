@@ -149,7 +149,62 @@ def deskew(img_gray_arr):
     except Exception:
         return img_gray_arr
 
-def deblur_image(gray_arr):
+def auto_crop_barcode(image: Image.Image):
+    """
+    يكتشف منطقة الباركود تلقائياً ويزوم عليها.
+    يبحث عن المنطقة ذات الكثافة العالية من الخطوط الرأسية.
+    """
+    if not CV2_OK:
+        return []
+    crops = []
+    try:
+        arr  = np.array(image.convert("RGB"))
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        h, w = gray.shape
+
+        # Sobel رأسي لاكتشاف الخطوط الرأسية (خاصية الباركود الخطي)
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobelx = np.uint8(np.absolute(sobelx))
+
+        # threshold + morphological لتجميع منطقة الباركود
+        _, thresh = cv2.threshold(sobelx, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        kernel   = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 5))
+        closed   = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        kernel2  = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 15))
+        closed   = cv2.morphologyEx(closed, cv2.MORPH_DILATE, kernel2)
+
+        # ابحث عن أكبر contour
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return []
+
+        # رتّب حسب المساحة وخذ أكبر 3
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:3]
+        for cnt in contours:
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            # تجاهل المناطق الصغيرة جداً
+            if cw < w * 0.1 or ch < h * 0.05:
+                continue
+            # أضف padding
+            pad_x, pad_y = int(cw * 0.1), int(ch * 0.2)
+            x1 = max(0, x - pad_x)
+            y1 = max(0, y - pad_y)
+            x2 = min(w, x + cw + pad_x)
+            y2 = min(h, y + ch + pad_y)
+            cropped = image.crop((x1, y1, x2, y2))
+            # كبّر الـ crop لـ 400px على الأقل عرضاً
+            cw2, ch2 = cropped.size
+            if cw2 < 400:
+                scale = 400 / cw2
+                cropped = cropped.resize((int(cw2*scale), int(ch2*scale)), Image.LANCZOS)
+            else:
+                cropped = cropped.resize((cw2*2, ch2*2), Image.LANCZOS)
+            crops.append(cropped)
+    except Exception:
+        pass
+    return crops
+
+
     try:
         blurred = cv2.GaussianBlur(gray_arr, (0, 0), 3)
         deblurred = cv2.addWeighted(gray_arr, 2.5, blurred, -1.5, 0)
@@ -311,14 +366,23 @@ def decode_barcode(image: Image.Image):
     orig = image.convert("RGB")
     w, h = orig.size
 
-    # أولاً: الصورة الأصلية بكل الاتجاهات (الأسرع)
+    # ====== الخطوة 0: auto-crop - اكتشف الباركود وزوم عليه ======
+    crops = auto_crop_barcode(orig)
+    for crop in crops:
+        for angle in [0, 90, 270, 180]:
+            rotated = crop.rotate(angle, expand=True) if angle != 0 else crop
+            for fn in [try_zxing, try_pyzbar, try_opencv]:
+                r = fn(rotated)
+                if r and r.strip(): return r.strip()
+
+    # ====== الخطوة 1: الصورة الأصلية بكل الاتجاهات ======
     for angle in [0, 90, 270, 180]:
         rotated = orig.rotate(angle, expand=True) if angle != 0 else orig
         for fn in [try_zxing, try_pyzbar, try_opencv]:
             r = fn(rotated)
             if r and r.strip(): return r.strip()
 
-    # ثانياً: مكبّرة ×2 بكل الاتجاهات
+    # ====== الخطوة 2: مكبّرة ×2 بكل الاتجاهات ======
     big = orig.resize((w * 2, h * 2), Image.LANCZOS)
     for angle in [0, 90, 270, 180]:
         rotated = big.rotate(angle, expand=True) if angle != 0 else big
@@ -326,7 +390,7 @@ def decode_barcode(image: Image.Image):
             r = fn(rotated)
             if r and r.strip(): return r.strip()
 
-    # ثالثاً: variants المعالجة (deblur + contrast + deskew)
+    # ====== الخطوة 3: variants المعالجة (deblur + contrast + deskew) ======
     variants = make_variants(image)
     for v in variants:
         for fn in [try_zxing, try_pyzbar, try_opencv]:
