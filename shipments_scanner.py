@@ -431,14 +431,7 @@ def scan_and_show(awb: str, data: list):
 st.markdown("<h1>📦 سكانر الشحنات</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align:center; color:#aaa; margin-top:-12px;'>تسجيل ومتابعة أرقام الشحنات الصادرة</p>", unsafe_allow_html=True)
 
-libs = []
-if ZXING_OK:  libs.append("✅ zxing-cpp")
-else:         libs.append("❌ zxing-cpp")
-if PYZBAR_OK: libs.append("✅ pyzbar")
-else:         libs.append("❌ pyzbar")
-if CV2_OK:    libs.append("✅ opencv")
-else:         libs.append("❌ opencv")
-st.caption("مكتبات القراءة: " + " | ".join(libs))
+
 
 tab1, tab2 = st.tabs(["📷 سكان", "📋 القائمة"])
 
@@ -484,8 +477,23 @@ with tab1:
     if search_input.strip():
         typed = search_input.strip()
 
-        # فلترة الاقتراحات - تبدأ بنفس الأحرف المكتوبة
-        suggestions = [awb for awb in all_awbs if awb.upper().startswith(typed.upper())]
+        # فلترة الاقتراحات:
+        # - إذا المدخل ≤ 4 أحرف → ابحث في [-5:-1] (آخر 4 قبل الحرف الأخير) + البداية
+        # - إذا المدخل > 4 أحرف → ابتداء الرقم كالمعتاد
+        typed_upper = typed.upper()
+
+        if len(typed) <= 4:
+            suggestions = [
+                awb for awb in all_awbs
+                if awb.upper().startswith(typed_upper)
+                or awb.upper()[-5:-1] == typed_upper
+            ]
+        else:
+            suggestions = [awb for awb in all_awbs if awb.upper().startswith(typed_upper)]
+
+        # ترتيب من الأحدث للأقدم (عكس الترتيب في الشيت)
+        all_awbs_ordered = [row[0].strip() for row in reversed(data_for_search[1:]) if len(row) > 0 and row[0].strip()]
+        suggestions = sorted(suggestions, key=lambda x: all_awbs_ordered.index(x) if x in all_awbs_ordered else 9999)
 
         # لو الكود المكتوب مطابق تماماً لشحنة موجودة → ابحث مباشرة
         exact_match = typed in all_awbs
